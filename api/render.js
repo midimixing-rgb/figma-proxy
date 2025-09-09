@@ -10,17 +10,19 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   if (req.method !== 'POST') {
+    console.log('Invalid method:', req.method);
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  let browser = null;
+  let browser;
   try {
     const { html, options = {} } = req.body;
     if (!html) {
+      console.log('No HTML provided');
       return res.status(400).json({ error: 'Missing "html" in request body' });
     }
 
-    // Launch headless browser
+    console.log('Launching browser...');
     browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
@@ -28,12 +30,73 @@ export default async function handler(req, res) {
       headless: chromium.headless,
       ignoreHTTPSErrors: true,
     });
+    console.log('Browser launched');
 
     const page = await browser.newPage();
+    console.log('New page created');
+
     await page.setViewport({
       width: options.viewport?.width || 1280,
       height: options.viewport?.height || 800,
       deviceScaleFactor: 1,
+    });
+    console.log('Viewport set');
+
+    await page.setRequestInterception(true);
+    page.on('request', req => {
+      const type = req.resourceType();
+      if (type === 'script' || type === 'stylesheet') {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+    console.log('Request interception enabled');
+
+    const enhancedHTML = `
+      <!DOCTYPE html>
+      <html><head><meta charset="UTF-8">
+      <style>script, noscript {display:none!important;}</style>
+      </head><body>${html}</body></html>
+    `;
+    console.log('Setting content...');
+    await page.setContent(enhancedHTML, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    console.log('Content set, waiting...');
+    await page.waitForTimeout(2000);
+
+    console.log('Extracting data...');
+    const data = await page.evaluate(() => {
+      function extract(el, depth = 0) {
+        if (depth > 6) return null;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        if (rect.width < 2 || rect.height < 2 || style.display === 'none') return null;
+        const tag = el.tagName.toLowerCase();
+        if (['script','noscript','meta','link','style'].includes(tag)) return null;
+        const text = el.innerText.trim().substring(0,1000);
+        const node = { tag, text, bounds: { x:rect.left,y:rect.top,width:rect.width,height:rect.height }, children:[] };
+        for (const c of el.children) {
+          const child = extract(c, depth+1);
+          if (child) node.children.push(child);
+        }
+        return (node.text||node.children.length) ? node : null;
+      }
+      return { elements: extract(document.body), viewport:{width:window.innerWidth,height:window.innerHeight} };
+    });
+    console.log('Data extracted');
+
+    await browser.close();
+    console.log('Browser closed');
+
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    console.error('Error at render.js:', err);
+    if (browser) {
+      try { await browser.close(); } catch(e) { console.error('Close error:', e); }
+    }
+    return res.status(500).json({ error: 'FUNCTION_INVOCATION_FAILED', message: err.message, stack: err.stack });
+  }
+}
     });
 
     // Block scripts and styles
