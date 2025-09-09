@@ -1,22 +1,18 @@
 {
   "name": "webcraft-proxy",
   "version": "2.0.0",
-  "description": "A Vercel proxy server for handling cross-origin requests and professional HTML rendering",
+  "description": "A proxy server for handling cross-origin requests and HTML rendering",
   "type": "module",
   "scripts": {
-    "dev": "vercel dev",
-    "build": "echo 'Build complete'",
-    "start": "vercel dev"
+    "start": "node server.js"
   },
   "dependencies": {
     "@sparticuz/chromium": "^131.0.0",
     "puppeteer-core": "^23.0.0",
-    "cors": "^2.8.5"
-  },
-  "devDependencies": {
-    "vercel": "^37.0.0"
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
   },
   "engines": {
-    "node": "22.x"
+    "node": "20.x"
   }
 }
