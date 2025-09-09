@@ -1,39 +1,125 @@
-// api/render.js - Fixed with modern dependencies
+// api/render.js
 import puppeteer from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';
 
 export default async function handler(req, res) {
-  // CORS headers
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  const { html, options = {} } = req.body;
-
-  if (!html) {
-    return res.status(400).json({ error: 'HTML content is required' });
+    return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
   let browser = null;
-
   try {
-    console.log('Starting browser launch...');
+    const { html, options = {} } = req.body;
+    if (!html) {
+      return res.status(400).json({ error: 'Missing "html" in request body' });
+    }
 
-    // Launch browser with @sparticuz/chromium
+    // Launch headless browser
     browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
       headless: chromium.headless,
       ignoreHTTPSErrors: true,
+    });
+
+    const page = await browser.newPage();
+    await page.setViewport({
+      width: options.viewport?.width || 1280,
+      height: options.viewport?.height || 800,
+      deviceScaleFactor: 1,
+    });
+
+    // Block scripts and styles
+    await page.setRequestInterception(true);
+    page.on('request', request => {
+      const type = request.resourceType();
+      if (type === 'script' || type === 'stylesheet') {
+        request.abort();
+      } else {
+        request.continue();
+      }
+    });
+
+    // Inject HTML
+    const enhancedHTML = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <style>
+            * { box-sizing: border-box!important; }
+            body { margin:0!important; padding:20px!important; font-family:system-ui,sans-serif!important; }
+            script, noscript { display: none!important; }
+          </style>
+        </head>
+        <body>${html}</body>
+      </html>
+    `;
+    await page.setContent(enhancedHTML, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(2000);
+
+    // Extract visible element data
+    const data = await page.evaluate(() => {
+      function extract(el, depth = 0) {
+        if (depth > 6) return null;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        if (rect.width < 2 || rect.height < 2 || style.display === 'none' || style.visibility === 'hidden') return null;
+        const tag = el.tagName.toLowerCase();
+        if (['script','noscript','meta','link','style'].includes(tag)) return null;
+        let text = el.innerText?.trim() || '';
+        if (/function|document\.|window\./.test(text)) text = '';
+        const node = {
+          tag,
+          text: text.slice(0, 1000),
+          bounds: { x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) },
+          styles: {
+            fontFamily: style.fontFamily,
+            fontSize: parseFloat(style.fontSize) || 14,
+            color: style.color,
+            backgroundColor: style.backgroundColor,
+            borderRadius: parseFloat(style.borderRadius) || 0,
+            padding: {
+              top: parseFloat(style.paddingTop)||0,
+              right: parseFloat(style.paddingRight)||0,
+              bottom: parseFloat(style.paddingBottom)||0,
+              left: parseFloat(style.paddingLeft)||0
+            },
+            margin: {
+              top: parseFloat(style.marginTop)||0,
+              right: parseFloat(style.marginRight)||0,
+              bottom: parseFloat(style.marginBottom)||0,
+              left: parseFloat(style.marginLeft)||0
+            }
+          },
+          children: []
+        };
+        for (const child of el.children) {
+          const c = extract(child, depth+1);
+          if (c) node.children.push(c);
+        }
+        return (node.text || node.children.length>0 || ['img','button','input','a'].includes(tag)) ? node : null;
+      }
+      const root = extract(document.body);
+      return { elements: root, viewport: { width: window.innerWidth, height: window.innerHeight } };
+    });
+
+    await browser.close();
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    console.error('Render error:', err);
+    if (browser) await browser.close();
+    return res.status(500).json({ error: 'Internal Server Error', message: err.message });
+  }
+}
     });
 
     console.log('Browser launched successfully');
