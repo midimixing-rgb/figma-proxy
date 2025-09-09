@@ -1,8 +1,17 @@
-// api/render.js - Fixed to extract only visible content, ignore scripts
-const puppeteer = require('puppeteer-core');
-const chromium = require('chrome-aws-lambda');
+// api/render.js - Fixed with modern dependencies
+import puppeteer from 'puppeteer-core';
+import chromium from '@sparticuz/chromium';
 
 export default async function handler(req, res) {
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -16,25 +25,210 @@ export default async function handler(req, res) {
   let browser = null;
 
   try {
+    console.log('Starting browser launch...');
+
+    // Launch browser with @sparticuz/chromium
     browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath,
+      executablePath: await chromium.executablePath(),
       headless: chromium.headless,
       ignoreHTTPSErrors: true,
     });
 
+    console.log('Browser launched successfully');
+
     const page = await browser.newPage();
 
+    // Set viewport
     await page.setViewport({
       width: options.viewport?.width || 1280,
       height: options.viewport?.height || 800,
       deviceScaleFactor: 1,
     });
 
-    // Enhanced HTML with script blocking and normalization
+    console.log('Viewport set');
+
+    // Block JavaScript and ads for faster loading
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (resourceType === 'script' || resourceType === 'stylesheet' || resourceType === 'image') {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
+    // Enhanced HTML with script blocking
     const enhancedHTML = `
       <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            * { 
+              box-sizing: border-box !important;
+              -webkit-font-smoothing: antialiased !important;
+            }
+            body { 
+              margin: 0 !important;
+              padding: 20px !important;
+              font-family: system-ui, sans-serif !important;
+              line-height: 1.5 !important;
+            }
+            script { display: none !important; }
+            noscript { display: none !important; }
+          </style>
+        </head>
+        <body>
+          ${html}
+        </body>
+      </html>
+    `;
+
+    console.log('Setting content...');
+    await page.setContent(enhancedHTML, { waitUntil: 'domcontentloaded', timeout: 10000 });
+    
+    console.log('Content set, waiting...');
+    await page.waitForTimeout(2000);
+
+    console.log('Extracting data...');
+
+    // Extract element data with script filtering
+    const renderData = await page.evaluate(() => {
+      
+      // Remove scripts first
+      const scripts = document.querySelectorAll('script, noscript, style[data-href*="javascript"]');
+      scripts.forEach(script => script.remove());
+      
+      function extractElementData(element, depth = 0) {
+        if (depth > 6) return null;
+
+        const rect = element.getBoundingClientRect();
+        const computed = window.getComputedStyle(element);
+        const tagName = element.tagName.toLowerCase();
+
+        // Skip problematic elements
+        if (['script', 'noscript', 'meta', 'link', 'style'].includes(tagName)) {
+          return null;
+        }
+
+        // Skip invisible elements
+        if (rect.width <= 1 || rect.height <= 1 || computed.display === 'none') {
+          return null;
+        }
+
+        // Get clean text content
+        let textContent = '';
+        if (element.innerText) {
+          textContent = element.innerText.trim();
+        }
+
+        // Skip JavaScript-like content
+        if (textContent.includes('function') || textContent.includes('document.') || textContent.includes('window.')) {
+          return null;
+        }
+
+        const data = {
+          tagName,
+          textContent: textContent.substring(0, 1000),
+          
+          bounds: {
+            x: Math.round(rect.left),
+            y: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          },
+          
+          styles: {
+            fontFamily: computed.fontFamily,
+            fontSize: parseFloat(computed.fontSize) || 14,
+            fontWeight: computed.fontWeight,
+            textAlign: computed.textAlign,
+            color: computed.color,
+            backgroundColor: computed.backgroundColor,
+            borderRadius: parseFloat(computed.borderRadius) || 0,
+            padding: {
+              top: parseFloat(computed.paddingTop) || 0,
+              right: parseFloat(computed.paddingRight) || 0,
+              bottom: parseFloat(computed.paddingBottom) || 0,
+              left: parseFloat(computed.paddingLeft) || 0,
+            },
+            margin: {
+              top: parseFloat(computed.marginTop) || 0,
+              right: parseFloat(computed.marginRight) || 0,
+              bottom: parseFloat(computed.marginBottom) || 0,
+              left: parseFloat(computed.marginLeft) || 0,
+            },
+          },
+          
+          attributes: {
+            id: element.id,
+            className: element.className,
+            src: element.getAttribute('src'),
+            alt: element.getAttribute('alt'),
+            href: element.getAttribute('href'),
+          },
+          
+          children: []
+        };
+
+        // Process children for meaningful elements
+        if (element.children && (textContent || ['div', 'section', 'article', 'header', 'main'].includes(tagName))) {
+          Array.from(element.children).forEach(child => {
+            const childData = extractElementData(child, depth + 1);
+            if (childData) {
+              data.children.push(childData);
+            }
+          });
+        }
+
+        // Return only meaningful elements
+        return (textContent || data.children.length > 0 || ['img', 'button', 'input'].includes(tagName)) ? data : null;
+      }
+
+      const bodyData = extractElementData(document.body);
+      
+      return {
+        elements: bodyData,
+        viewport: {
+          width: window.innerWidth,
+          height: window.innerHeight,
+        },
+        totalElements: document.querySelectorAll('*').length,
+      };
+    });
+
+    console.log('Data extracted successfully');
+
+    await browser.close();
+    console.log('Browser closed');
+
+    return res.status(200).json({
+      success: true,
+      data: renderData,
+      timestamp: new Date().toISOString(),
+    });
+
+  } catch (error) {
+    console.error('Rendering error:', error.message);
+    
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (closeError) {
+        console.error('Error closing browser:', closeError.message);
+      }
+    }
+
+    return res.status(500).json({
+      error: 'Rendering failed',
+      message: error.message,
+    });
+  }
+}      <!DOCTYPE html>
       <html>
         <head>
           <meta charset="UTF-8">
