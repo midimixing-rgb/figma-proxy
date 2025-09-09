@@ -9,14 +9,14 @@
     "start": "vercel dev"
   },
   "dependencies": {
-    "@sparticuz/chromium": "^121.0.0",
-    "puppeteer-core": "^21.0.0",
+    "@sparticuz/chromium": "^131.0.0",
+    "puppeteer-core": "^23.0.0",
     "cors": "^2.8.5"
   },
   "devDependencies": {
-    "vercel": "^32.0.0"
+    "vercel": "^37.0.0"
   },
   "engines": {
-    "node": "18.x"
+    "node": "22.x"
   }
 }
